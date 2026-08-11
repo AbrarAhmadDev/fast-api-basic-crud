@@ -1,3 +1,4 @@
+import base64
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Depends, Query, Request
@@ -5,9 +6,10 @@ from typing import Any, Annotated, Generic, Optional, TypeVar
 from sqlmodel import Field, Session, SQLModel, create_engine, func, select
 
 from pydantic import BaseModel
+import json
 
 class Campaign(SQLModel, table=True):
-    campaign_id: int | None = Field(default=None, primary_key=True)
+    campaign_id: int = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     due_date: datetime | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
@@ -72,39 +74,70 @@ class Response(BaseModel, Generic[T]):
 class PaginatedResponse(BaseModel, Generic[T]):
     data: T
     next: Optional[str]
-    prev: Optional[str]
+    # prev: Optional[str]
     # count: int
-    
+
+def encode_cursor(value):
+    raw = json.dumps({"id": value})
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+def decode_cursor(cursor):
+    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    payload = json.loads(raw)
+    return payload.get("id")
 
 @app.get("/campaigns", response_model=PaginatedResponse[list[Campaign]])
-async def read_campaigns(request : Request, session: SessionDep, offset: int = Query(0,ge=0), limit : int = Query(20,ge=1)): # type: ignore
-    data = session.exec(select(Campaign).order_by(Campaign.campaign_id).offset(offset).limit(limit)).all() #type:ignore
+async def read_campaigns(request : Request, session: SessionDep, cursor: Optional[str] = Query(None), limit : int = Query(10,ge=1)): # type: ignore
+
+    cursor_id = 0
+
+    if cursor:
+        cursor_id = decode_cursor(cursor)
+
+    data = session.exec(select(Campaign).order_by(Campaign.campaign_id).where(Campaign.campaign_id > cursor_id).limit(limit+1)).all() #type:ignore
 
     base_url = str(request.url).split("?")[0]
+    next_url = None
+    if len(data) > limit:
+        next_cursor = encode_cursor(data[:limit][-1].campaign_id)
+        next_url = f"{base_url}?cursor={next_cursor}&limit={limit}"
 
-    # Approach 1
-
-    # total = session.exec(select(func.count()).select_from(Campaign)).one()
-
-    # if offset + limit < total:
-    #     next_url = f"{base_url}?page={page+1}&page_size={limit}"
-    # else:
-    #     next_url = None
-    
-    # Approach 2
-    next_url = f"{base_url}?offset={offset+limit}&limit={limit}"
-
-    if offset > 0:
-        prev_url = f"{base_url}?offset={max(0,offset-limit)}&limit={limit}"
-    else:
-        prev_url = None
-    
     return {
         # "count":total,
         "next": next_url,
-        "prev": prev_url,
-        "data": data
-        } # type: ignore
+        # "prev": prev_url,
+        "data": data[:limit]
+        } # type: ignore  
+
+# @app.get("/campaigns", response_model=PaginatedResponse[list[Campaign]])
+# async def read_campaigns(request : Request, session: SessionDep, offset: int = Query(0,ge=0), limit : int = Query(20,ge=1)): # type: ignore
+#     data = session.exec(select(Campaign).order_by(Campaign.campaign_id).offset(offset).limit(limit)).all() #type:ignore
+
+#     base_url = str(request.url).split("?")[0]
+
+#     # Approach 1
+
+#     # total = session.exec(select(func.count()).select_from(Campaign)).one()
+
+#     # if offset + limit < total:
+#     #     next_url = f"{base_url}?page={page+1}&page_size={limit}"
+#     # else:
+#     #     next_url = None
+    
+#     # Approach 2
+#     next_url = f"{base_url}?offset={offset+limit}&limit={limit}"
+
+#     if offset > 0:
+#         prev_url = f"{base_url}?offset={max(0,offset-limit)}&limit={limit}"
+#     else:
+#         prev_url = None
+    
+#     return {
+#         # "count":total,
+#         "next": next_url,
+#         "prev": prev_url,
+#         "data": data
+#         } # type: ignore
 
 @app.get("/campaigns/{id}",response_model=Response[Campaign])
 async def read_campaign(id : int, session: SessionDep):
